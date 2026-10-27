@@ -3,8 +3,8 @@ services:
     name: lab2bdf
     runtime: node
     plan: free
-    buildCommand: npm install
+    buildCommand: npm install && npm rebuild sqlite3 --build-from-source
     startCommand: node app.js
     envVars:
       - key: NODE_VERSION
-        value: 20
+        value: 20.18.0
