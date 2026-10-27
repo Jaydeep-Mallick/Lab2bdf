@@ -1,5 +1,6 @@
 const express = require("express");
 const path = require("path");
+const fs = require("fs");
 const { open } = require("sqlite");
 const sqlite3 = require("sqlite3");
 
@@ -8,12 +9,14 @@ const app = express();
 // Middleware to parse incoming JSON request bodies
 app.use(express.json());
 
-// Absolute path to the SQLite database file
-const dbPath = path.join(__dirname, "books.db");
+// Deployment-safe database path: supports environment variable DB_PATH or defaults to local directory
+const dbPath = process.env.DB_PATH || path.join(__dirname, "books.db");
 let db = null;
+let server = null;
+let isInitialized = false;
 
 // ==========================================
-// ROOT ROUTE (Convenience for Safari / Browsers)
+// ROOT ROUTE (Convenience for Browsers / Render Health)
 // ==========================================
 app.get("/", (req, res) => {
   res.redirect("/books/");
@@ -206,11 +209,23 @@ app.delete("/books/:bookId/", async (req, res) => {
 // ==========================================
 
 /**
- * Initializes the SQLite database connection and starts the Express server.
- * Ensures the database is ready and the table exists before accepting requests.
+ * Initializes the SQLite database connection, ensures schema and seed records,
+ * and starts the Express server.
  */
 const initializeDBAndServer = async () => {
+  // Prevent duplicate initialization
+  if (isInitialized) {
+    return server;
+  }
+
   try {
+    // Ensure parent directory exists (for custom mounted disk paths like /var/data)
+    const dbDir = path.dirname(dbPath);
+    if (!fs.existsSync(dbDir)) {
+      fs.mkdirSync(dbDir, { recursive: true });
+    }
+
+    // Open connection to SQLite
     db = await open({
       filename: dbPath,
       driver: sqlite3.Database,
@@ -220,22 +235,55 @@ const initializeDBAndServer = async () => {
     await db.run(`
       CREATE TABLE IF NOT EXISTS book (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT,
-        author TEXT,
-        price INTEGER,
-        pages INTEGER
+        title TEXT NOT NULL,
+        author TEXT NOT NULL,
+        price INTEGER NOT NULL,
+        pages INTEGER NOT NULL
       );
     `);
 
-    const PORT = 3000;
-    app.listen(PORT, () => {
+    // Safe, idempotent seed: seed initial 10 books only if the table is currently empty
+    const bookCount = await db.get("SELECT COUNT(*) AS count FROM book;");
+    if (bookCount && bookCount.count === 0) {
+      await db.run(`
+        INSERT INTO book (title, author, price, pages) VALUES
+          ('To Kill a Mockingbird', 'Harper Lee', 450, 281),
+          ('1984', 'George Orwell', 399, 328),
+          ('The Great Gatsby', 'F. Scott Fitzgerald', 299, 180),
+          ('Pride and Prejudice', 'Jane Austen', 350, 279),
+          ('The Catcher in the Rye', 'J. D. Salinger', 420, 234),
+          ('The Hobbit', 'J. R. R. Tolkien', 499, 310),
+          ('Fahrenheit 451', 'Ray Bradbury', 380, 256),
+          ('Jane Eyre', 'Charlotte Bronte', 340, 500),
+          ('Animal Farm', 'George Orwell', 250, 112),
+          ('Brave New World', 'Aldous Huxley', 410, 288);
+      `);
+      console.log("Initial sample book records seeded successfully.");
+    }
+
+    // Use environment port provided by Render (process.env.PORT) or default to 3000 locally
+    const PORT = process.env.PORT || 3000;
+    server = app.listen(PORT, () => {
       console.log(`Server Running at http://localhost:${PORT}/`);
     });
+
+    isInitialized = true;
+    return server;
   } catch (error) {
-    console.error(`Database Error: ${error.message}`);
+    console.error(`Database / Server Startup Error: ${error.message}`);
     process.exit(1);
   }
 };
+
+// Graceful shutdown handling
+process.on("SIGTERM", () => {
+  if (server) {
+    server.close(() => {
+      console.log("Server process terminated gracefully.");
+      if (db) db.close();
+    });
+  }
+});
 
 // Start database connection and Express server
 initializeDBAndServer();
